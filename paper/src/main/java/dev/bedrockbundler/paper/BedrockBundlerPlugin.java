@@ -26,6 +26,8 @@ public final class BedrockBundlerPlugin extends JavaPlugin {
     private Settings settings;
     private ConversionService conversion;
     private FurnitureMirror furniture;
+    private DisplayMirrors displays;
+    private dev.bedrockbundler.paper.model.ModelMirror models;
     private BedrockPlayers bedrockPlayers;
     private ContentSource source;
     private EmotePlayer emotePlayer;
@@ -73,6 +75,19 @@ public final class BedrockBundlerPlugin extends JavaPlugin {
             }
         }
 
+        if (settings.displays().any()) {
+            if (bedrockPlayers == null) {
+                getLogger().warning("Display mirrors for Bedrock need Floodgate or Geyser-Spigot on this server; they are disabled.");
+            } else {
+                displays = new DisplayMirrors(this, bedrockPlayers, source, settings.displays(),
+                        settings.furnitureYawOffset(), settings.furnitureYOffset());
+                displays.start();
+                getLogger().info("Showing display entities and item frames to Bedrock players (detected via " + bedrockPlayers.source() + ")");
+            }
+        }
+
+        startModels();
+
         source.enable(this);
         getLogger().info("Converting " + source.pluginName() + " content for Bedrock" + (Scheduling.isFolia() ? " (Folia scheduling)" : ""));
         PluginCommand command = getCommand("bedrockbundler");
@@ -85,11 +100,48 @@ public final class BedrockBundlerPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (models != null) {
+            models.stop();
+        }
         if (furniture != null) {
             furniture.stop();
         }
+        if (displays != null) {
+            displays.stop();
+        }
         if (conversion != null) {
             conversion.shutdown();
+        }
+    }
+
+    /**
+     * BetterModel models (pets, NPC figures, crate and fish models) for Bedrock players: converted with the rest
+     * and mirrored at runtime. {@code models.enabled: false} switches it off (config reload with a restart).
+     */
+    private void startModels() {
+        if (!getConfig().getBoolean("models.enabled", true)) {
+            getLogger().info("Bedrock models are off (models.enabled: false).");
+            return;
+        }
+        if (getServer().getPluginManager().getPlugin("BetterModel") == null) {
+            return;
+        }
+        if (bedrockPlayers == null) {
+            getLogger().warning("Bedrock models need Floodgate or Geyser-Spigot on this server; they are disabled.");
+            return;
+        }
+        try {
+            dev.bedrockbundler.paper.model.ModelSource modelSource = (dev.bedrockbundler.paper.model.ModelSource)
+                    Class.forName("dev.bedrockbundler.paper.model.bettermodel.BetterModelSource")
+                            .getDeclaredConstructor().newInstance();
+            models = new dev.bedrockbundler.paper.model.ModelMirror(this, this::isBedrock, modelSource,
+                    getConfig().getDouble("models.view-range", 48));
+            models.enabled(true);
+            conversion.models(models, getDataFolder().toPath().getParent().resolve(getConfig().getString("models.directory", "BetterModel/models")));
+            models.start();
+            getLogger().info("Showing BetterModel models to Bedrock players");
+        } catch (ReflectiveOperationException | LinkageError e) {
+            getLogger().warning("This build or Java version cannot read BetterModel models (needs a build on Java 25): " + e);
         }
     }
 
@@ -233,6 +285,18 @@ public final class BedrockBundlerPlugin extends JavaPlugin {
         return source;
     }
 
+    /** Mirror stands alive per kind, for {@code /bedrockbundler status}; null when nothing is mirrored. */
+    String mirrorStatus() {
+        StringBuilder line = new StringBuilder();
+        if (furniture != null) {
+            line.append(furniture.count()).append(" furniture");
+        }
+        if (displays != null) {
+            line.append(line.isEmpty() ? "" : ", ").append(displays.statusLine());
+        }
+        return line.isEmpty() ? null : line.toString();
+    }
+
     private void reply(CommandSender sender, String message) {
         getLogger().warning(message);
         if (sender != null && !(sender instanceof org.bukkit.command.ConsoleCommandSender)) {
@@ -242,6 +306,11 @@ public final class BedrockBundlerPlugin extends JavaPlugin {
 
     Settings settings() {
         return settings;
+    }
+
+    /** Number of BetterModel models currently mirrored for Bedrock, or -1 when models are off. */
+    int modelCount() {
+        return models == null ? -1 : models.count();
     }
 
     ConversionService conversion() {

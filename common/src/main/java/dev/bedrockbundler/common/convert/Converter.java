@@ -9,6 +9,10 @@ import dev.bedrockbundler.common.input.IaBlock;
 import dev.bedrockbundler.common.input.IaItem;
 import dev.bedrockbundler.common.java.JavaPack;
 import dev.bedrockbundler.common.java.ModelResolver;
+import dev.bedrockbundler.common.java.VanillaAssets;
+import dev.bedrockbundler.common.model.ModelConverter;
+import dev.bedrockbundler.common.model.ModelInput;
+import dev.bedrockbundler.common.model.ModelSpec;
 import dev.bedrockbundler.common.spec.BlockSpec;
 import dev.bedrockbundler.common.spec.Bundle;
 import dev.bedrockbundler.common.spec.ItemSpec;
@@ -24,7 +28,7 @@ import java.util.Set;
 public final class Converter {
 
     /** Bump whenever converter output changes, so servers regenerate bundles made by older versions. */
-    public static final int CONVERTER_VERSION = 39;
+    public static final int CONVERTER_VERSION = 41;
 
     public record Result(Bundle bundle, byte[] mcpack, byte[] mappings, byte[] blockMappings, List<String> warnings) {
     }
@@ -34,10 +38,32 @@ public final class Converter {
 
     /** Hash identifying the conversion input; equal hashes produce identical output. */
     public static String hash(ConversionInput input, ConversionContext.Options options) {
-        String extra = CONVERTER_VERSION + "|" + options + "|" + Json.GSON.toJson(input.items()) + "|" + Json.GSON.toJson(input.blocks())
+        return hash(input, options, VanillaAssets.NONE);
+    }
+
+    /** As {@link #hash(ConversionInput, ConversionContext.Options)}; the vanilla assets' version changes the output. */
+    public static String hash(ConversionInput input, ConversionContext.Options options, VanillaAssets vanilla) {
+        String extra = CONVERTER_VERSION + "|" + vanilla.version() + "|" + options + "|" + Json.GSON.toJson(input.items()) + "|" + Json.GSON.toJson(input.blocks())
                 + (input.paintings().isEmpty() ? "" : "|" + Json.GSON.toJson(input.paintings()))
-                + (input.emotes().isEmpty() ? "" : "|" + Json.GSON.toJson(input.emotes()));
+                + (input.emotes().isEmpty() ? "" : "|" + Json.GSON.toJson(input.emotes()))
+                + "|" + modelsDigest(input);
         return JavaPack.hash(input.javaPack(), extra);
+    }
+
+    /** Models are big byte arrays: hash them instead of serialising them into the hash input. */
+    private static String modelsDigest(ConversionInput input) {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            for (ModelInput model : input.models().stream().sorted(Comparator.comparing(ModelInput::id)).toList()) {
+                digest.update(model.id().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                digest.update((byte) 0);
+                digest.update(model.bbmodel());
+                digest.update((byte) 0);
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /**
@@ -78,6 +104,15 @@ public final class Converter {
     }
 
     public static Result convert(ConversionInput input, ConversionContext.Options options, String packName) {
+        return convert(input, options, packName, VanillaAssets.NONE);
+    }
+
+    /**
+     * @param vanilla vanilla client files; {@code minecraft:} textures that models use but the pack does not carry
+     *                are copied from here into the Bedrock pack
+     */
+    public static Result convert(ConversionInput input, ConversionContext.Options options, String packName,
+                                 VanillaAssets vanilla) {
         ConversionLog log = new ConversionLog();
         Map<String, byte[]> files = input.javaPack();
         List<IaItem> paintings = List.of();
@@ -89,7 +124,7 @@ public final class Converter {
         JavaPack javaPack = new JavaPack(files);
         BedrockPack bedrockPack = new BedrockPack();
         ConversionContext ctx = new ConversionContext(javaPack, new ModelResolver(javaPack, log),
-                new Textures(javaPack, log), bedrockPack, log, options);
+                new Textures(javaPack, vanilla, log), bedrockPack, log, options);
 
         List<IaItem> sortedItems = new ArrayList<>(input.items());
         sortedItems.addAll(modelVariants(input.items(), javaPack));
@@ -143,11 +178,26 @@ public final class Converter {
             }
         }
 
+        List<ModelSpec> models = List.of();
+        if (!input.models().isEmpty()) {
+            try {
+                models = ModelConverter.convert(input.models(), bedrockPack, log);
+                for (ModelSpec spec : models) {
+                    // A model that needs more than 32 entity properties (Bedrock's limit) cannot be driven.
+                    if (spec.properties().size() > 32) {
+                        log.warn("model " + spec.id() + " needs " + spec.properties().size() + " entity properties; Bedrock allows 32");
+                    }
+                }
+            } catch (RuntimeException e) {
+                log.warn("Model conversion failed: " + e);
+            }
+        }
+
         String hash = hash(input, options);
         // Keep version components small (0-999); any content change still changes the version.
         int[] version = {1, Integer.parseInt(hash.substring(0, 4), 16) % 1000, Integer.parseInt(hash.substring(4, 8), 16) % 1000};
         byte[] mcpack = bedrockPack.build(packName, "Custom content for Bedrock players, generated by BedrockBundler", version);
-        Bundle bundle = new Bundle(Bundle.FORMAT_VERSION, CONVERTER_VERSION, hash, items, blocks);
+        Bundle bundle = new Bundle(Bundle.FORMAT_VERSION, CONVERTER_VERSION, hash, items, blocks, models);
         return new Result(bundle, mcpack, MappingWriter.bytes(items), BlockMappingWriter.bytes(blocks), log.warnings());
     }
 }

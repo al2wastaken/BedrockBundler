@@ -6,6 +6,8 @@ import dev.bedrockbundler.common.input.ConversionInput;
 import dev.bedrockbundler.common.input.IaBlock;
 import dev.bedrockbundler.common.input.IaItem;
 import dev.bedrockbundler.common.input.PaintingVariant;
+import dev.bedrockbundler.common.java.VanillaAssets;
+import dev.bedrockbundler.common.java.VanillaClientJar;
 import dev.bedrockbundler.common.spec.Bundle;
 import dev.bedrockbundler.paper.deploy.Deployer;
 import io.papermc.paper.registry.RegistryAccess;
@@ -44,6 +46,8 @@ final class ConversionService {
     /** Hash of the bundle that existed at startup, i.e. what Geyser most likely loaded. */
     private final String startupHash;
     private volatile Status status;
+    private volatile dev.bedrockbundler.paper.model.ModelMirror models;
+    private volatile Path modelDirectory;
 
     ConversionService(BedrockBundlerPlugin plugin, Deployer deployer, ConversionContext.Options options, String packName) {
         this.plugin = plugin;
@@ -52,6 +56,47 @@ final class ConversionService {
         this.options = options;
         this.packName = packName;
         this.startupHash = currentHash();
+    }
+
+    /** Converts the .bbmodel files of BetterModel too, and tells the mirror which models the bundle holds. */
+    void models(dev.bedrockbundler.paper.model.ModelMirror mirror, Path directory) {
+        this.models = mirror;
+        this.modelDirectory = directory;
+        try {
+            Bundle bundle = Bundle.read(bundleFolder);
+            if (bundle != null && bundle.converterVersion() == Converter.CONVERTER_VERSION) {
+                mirror.bundle(bundle);
+            }
+        } catch (IOException | RuntimeException e) {
+            plugin.getLogger().log(Level.WARNING, "Could not read the existing Bedrock bundle for the models", e);
+        }
+    }
+
+    /** The BetterModel files, read in the converter thread. Unreadable files are skipped with a warning. */
+    private List<dev.bedrockbundler.common.model.ModelInput> readModels() {
+        Path directory = modelDirectory;
+        if (directory == null || !Files.isDirectory(directory)) {
+            return List.of();
+        }
+        List<dev.bedrockbundler.common.model.ModelInput> inputs = new ArrayList<>();
+        try (var files = Files.list(directory)) {
+            for (Path file : files.sorted().toList()) {
+                String name = file.getFileName().toString();
+                if (!name.endsWith(".bbmodel")) {
+                    continue;
+                }
+                try {
+                    inputs.add(new dev.bedrockbundler.common.model.ModelInput(
+                            name.substring(0, name.length() - ".bbmodel".length()).toLowerCase(java.util.Locale.ROOT),
+                            Files.readAllBytes(file)));
+                } catch (IOException e) {
+                    plugin.getLogger().warning("Could not read model " + name + ": " + e.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            plugin.getLogger().warning("Could not list " + directory + ": " + e.getMessage());
+        }
+        return inputs;
     }
 
     Path bundleFolder() {
@@ -127,15 +172,20 @@ final class ConversionService {
         executor.execute(() -> run(input, options, skippedBlocks, force, sender));
     }
 
-    private void run(ConversionInput input, ConversionContext.Options options, List<String> skippedBlocks,
+    private void run(ConversionInput content, ConversionContext.Options options, List<String> skippedBlocks,
                      boolean force, CommandSender sender) {
-        try {
-            String hash = Converter.hash(input, options);
+        try (VanillaAssets vanilla = vanillaAssets()) {
+            ConversionInput input = new ConversionInput(content.javaPack(), content.items(), content.blocks(),
+                    content.paintings(), content.emotes(), readModels());
+            String hash = Converter.hash(input, options, vanilla);
             Bundle existing = Bundle.read(bundleFolder);
             if (!force && existing != null && hash.equals(existing.hash())
                     && existing.converterVersion() == Converter.CONVERTER_VERSION) {
                 deployer.deploy(bundleFolder);
                 Bundle bundle = existing;
+                if (models != null) {
+                    models.bundle(bundle);
+                }
                 status = new Status(Instant.now(), hash, bundle.items().size(), bundle.blocks().size(),
                         skippedBlocks.size(), 0, false);
                 message(sender, "Content is unchanged; Bedrock bundle is up to date.");
@@ -143,10 +193,13 @@ final class ConversionService {
             }
 
             long start = System.nanoTime();
-            Converter.Result result = Converter.convert(input, options, packName);
+            Converter.Result result = Converter.convert(input, options, packName, vanilla);
             result.bundle().write(bundleFolder, result.mcpack(), result.mappings(), result.blockMappings());
             writeWarnings(result.warnings(), skippedBlocks);
             deployer.deploy(bundleFolder);
+            if (models != null) {
+                models.bundle(result.bundle());
+            }
 
             status = new Status(Instant.now(), hash, result.bundle().items().size(), result.bundle().blocks().size(),
                     skippedBlocks.size(), result.warnings().size(), true);
@@ -163,6 +216,18 @@ final class ConversionService {
             plugin.getLogger().log(Level.SEVERE, "Bedrock conversion failed", e);
             message(sender, "Bedrock conversion failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Vanilla textures that custom models use but the content plugin's pack does not carry, from this server
+     * version's client jar (downloaded once into {@code vanilla/}). Without it those faces are not drawn on Bedrock.
+     */
+    private VanillaAssets vanillaAssets() {
+        if (!plugin.getConfig().getBoolean("vanilla-textures", true)) {
+            return VanillaAssets.NONE;
+        }
+        return VanillaClientJar.open(plugin.getServer().getMinecraftVersion(),
+                plugin.getDataFolder().toPath().resolve("vanilla"), message -> plugin.getLogger().warning(message));
     }
 
     private void writeWarnings(List<String> warnings, List<String> skippedBlocks) throws IOException {

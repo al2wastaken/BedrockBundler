@@ -3,6 +3,7 @@ package dev.bedrockbundler.common.bedrock;
 import dev.bedrockbundler.common.ConversionLog;
 import dev.bedrockbundler.common.ResourceId;
 import dev.bedrockbundler.common.java.JavaPack;
+import dev.bedrockbundler.common.java.VanillaAssets;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -19,15 +20,24 @@ import java.util.zip.DataFormatException;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.Inflater;
 
-/** Loads Java textures as images. Animated textures are reduced to their first frame. */
+/**
+ * Loads Java textures as images. Animated textures are reduced to their first frame. A {@code minecraft:} texture the
+ * pack does not carry comes from the vanilla client assets, except font sheets: Bedrock keeps its own font pages.
+ */
 public final class Textures {
 
     private final JavaPack pack;
+    private final VanillaAssets vanilla;
     private final ConversionLog log;
     private final Map<String, BufferedImage> cache = new HashMap<>();
 
     public Textures(JavaPack pack, ConversionLog log) {
+        this(pack, VanillaAssets.NONE, log);
+    }
+
+    public Textures(JavaPack pack, VanillaAssets vanilla, ConversionLog log) {
         this.pack = pack;
+        this.vanilla = vanilla;
         this.log = log;
     }
 
@@ -45,15 +55,24 @@ public final class Textures {
         ResourceId id = ResourceId.parse(textureId);
         String path = id.asset("textures", ".png");
         byte[] bytes = pack.bytes(path);
+        boolean animated = pack.has(path + ".mcmeta");
+        if (bytes == null && fromVanilla(id)) {
+            bytes = vanilla.bytes(path);
+            animated = vanilla.bytes(path + ".mcmeta") != null;
+        }
         BufferedImage image = null;
         if (bytes == null) {
             if (!isVanilla(textureId)) {
                 log.warn("Missing texture " + textureId);
+            } else if (fromVanilla(id)) {
+                log.warn("Missing texture " + textureId + ": not in the pack and not in the vanilla assets"
+                        + (vanilla == VanillaAssets.NONE ? " (none loaded)" : " of " + vanilla.version())
+                        + "; faces that use it are not drawn on Bedrock");
             }
         } else {
             try {
                 image = toArgb(read(bytes));
-                if (image != null && pack.has(path + ".mcmeta") && image.getHeight() > image.getWidth()) {
+                if (image != null && animated && image.getHeight() > image.getWidth()) {
                     image = image.getSubimage(0, 0, image.getWidth(), image.getWidth());
                 }
             } catch (IOException e) {
@@ -62,6 +81,11 @@ public final class Textures {
         }
         cache.put(textureId, image);
         return image;
+    }
+
+    /** Vanilla textures the converter may copy into the Bedrock pack: all but font sheets. */
+    private static boolean fromVanilla(ResourceId id) {
+        return id.namespace().equals("minecraft") && !id.path().startsWith("font/");
     }
 
     private static BufferedImage read(byte[] bytes) throws IOException {
@@ -180,5 +204,35 @@ public final class Textures {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /**
+     * Uncompressed 32 bit true colour TGA (image type 2, origin top left, 8 alpha bits), the format Bedrock's own
+     * packs use for the grayscale textures of dyeable items. Bedrock multiplies these with the dye colour.
+     */
+    public static byte[] tga(BufferedImage image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        ByteBuffer buffer = ByteBuffer.allocate(18 + width * height * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        buffer.put((byte) 0);            // no image id
+        buffer.put((byte) 0);            // no colour map
+        buffer.put((byte) 2);            // uncompressed true colour
+        buffer.put(new byte[5]);         // colour map specification
+        buffer.putShort((short) 0);      // x origin
+        buffer.putShort((short) 0);      // y origin
+        buffer.putShort((short) width);
+        buffer.putShort((short) height);
+        buffer.put((byte) 32);           // bits per pixel
+        buffer.put((byte) 0x28);         // 8 alpha bits, top-left origin
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int argb = image.getRGB(x, y);
+                buffer.put((byte) argb);                 // blue
+                buffer.put((byte) (argb >> 8));          // green
+                buffer.put((byte) (argb >> 16));         // red
+                buffer.put((byte) (argb >>> 24));        // alpha
+            }
+        }
+        return buffer.array();
     }
 }

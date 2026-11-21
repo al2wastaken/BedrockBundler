@@ -13,6 +13,13 @@ pack-name: "BedrockBundler"
 # Size in pixels of inventory icons rendered for 3D models (16-256).
 icon-size: 64
 
+# Vanilla textures that custom models use but the content plugin's pack does not carry (for example
+# minecraft:block/oak_planks on furniture). They come from the vanilla client jar of this server's version, downloaded
+# once from Mojang into plugins/BedrockBundler/vanilla/; only the textures in use go into the Bedrock pack.
+# Without it (false, or no internet) Bedrock does not draw those faces. To skip the download, put the client jar there
+# as client-<version>.jar.
+vanilla-textures: true
+
 fonts:
   # Convert font images (emojis, chat icons) to Bedrock glyph sheets. Bedrock draws glyphs at text size,
   # so HUDs and GUI backgrounds made of tall glyphs do not look like on Java.
@@ -34,6 +41,43 @@ furniture:
   yaw-offset: 0
   y-offset: 0
 
+displays:
+  # Show what Geyser cannot draw to Bedrock players, with an invisible armor stand that only Bedrock players see
+  # (same technique as furniture). Needs Floodgate (or Geyser-Spigot on this server). Works on Folia/Canvas.
+  # Geyser draws armor stands, item frames, text displays and interaction entities (click boxes) itself; those need
+  # nothing here. It has no Bedrock entity for item displays and block displays.
+  enabled: true
+  # Most mirror stands alive at once; a safety net against plugins that spawn thousands of displays.
+  max-mirrors: 2000
+  # A mirror only exists while a Bedrock player of the same world is this many blocks from the display (0 = always).
+  # The number of stands then follows the Bedrock players near displays, not the size of the world.
+  range: 64
+  items:
+    # Item displays of custom items that are not furniture (dungeon chests, backpacks, farming pot crops, props of
+    # other plugins). Geyser draws no item displays at all.
+    enabled: true
+    # Also item displays that show a vanilla block item (Bedrock draws blocks, not other items, on a stand's head).
+    vanilla-blocks: true
+  frames:
+    # Item frames and glow item frames holding a custom item: Bedrock draws only the item's flat icon there.
+    # Floor and ceiling frames and the item's rotation steps are not shown.
+    enabled: true
+    # Hide an invisible frame from Bedrock players while its mirror shows, so the flat icon does not show inside the
+    # model. Those players cannot click that frame then.
+    hide-invisible-original: true
+  blocks:
+    # Block displays as a block worn on the stand's head. Approximate and untested on Bedrock, so off by default.
+    # Only blocks that exist as items can be shown.
+    enabled: false
+  text:
+    # Text displays as name plates (colors cut to Bedrock's 16, bold and italic kept, underline and strikethrough
+    # dropped, font images kept). Geyser already draws text displays this way, so this is off by default; turn it on
+    # only where Geyser's version is wrong. The original is then hidden from Bedrock players so text is not doubled.
+    enabled: false
+    hide-original: true
+    # Fine-tuning of the name plate height (blocks).
+    y-offset: 0
+
 sync:
   # Where the converted bundle goes:
   #   AUTO   - LOCAL when Geyser-Spigot is installed on this server, otherwise OFF
@@ -51,3 +95,13 @@ sync:
     port: 8765
     # Shared secret for the extension. Generated on first start.
     token: ""
+
+models:
+  # Show BetterModel 3D models (pets, NPC figures, mobs with models, crate models, fish) to Bedrock players. The .bbmodel
+  # files are converted together with the Nexo pack; Geyser needs a restart after they change. Kill switch: set false
+  # and restart the server, Bedrock players then see no models (and no stand entities).
+  enabled: true
+  # Folder with the .bbmodel files, relative to the plugins folder.
+  directory: "BetterModel/models"
+  # Models farther than this (blocks) from a Bedrock player are not sent to them.
+  view-range: 48

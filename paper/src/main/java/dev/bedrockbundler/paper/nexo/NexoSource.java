@@ -221,6 +221,13 @@ public final class NexoSource implements ContentSource {
         return 0;
     }
 
+    /**
+     * Nexo 1.29 furniture is always an {@code item_display} (its own {@code NexoFurniture.isFurniture(Entity)}
+     * returns false for any other entity type, and the 1.29.1 jar has no item frame or armor stand code), so there
+     * is no frame or armor stand furniture to mirror for Nexo; Nexo converts old frame furniture itself. Hitboxes
+     * (interaction entities) and furniture text entities are packet-only, which Geyser translates. Custom items in
+     * plain item frames and item displays that are not furniture are handled by {@code DisplayMirrors}.
+     */
     @Override
     public boolean isFurniture(ItemDisplay display) {
         try {
@@ -252,7 +259,7 @@ public final class NexoSource implements ContentSource {
                 item = NexoFurniture.furnitureItem(display);
             }
             if (item != null && !item.getType().isAir()) {
-                return item;
+                return dyed(display, item);
             }
         } catch (RuntimeException | LinkageError e) {
             if (displayItemErrors++ < 3) {
@@ -260,6 +267,28 @@ public final class NexoSource implements ContentSource {
             }
         }
         return display.getItemStack();
+    }
+
+    /**
+     * Nexo keeps a furniture piece's dye on the display ({@code NexoFurniture.furnitureDye}) and may not put it on
+     * the item it hands out. Bedrock colours the item from its {@code dyed_color}, so a dyed piece gets it here.
+     */
+    private static ItemStack dyed(ItemDisplay display, ItemStack item) {
+        try {
+            if (item.hasData(io.papermc.paper.datacomponent.DataComponentTypes.DYED_COLOR)) {
+                return item;
+            }
+            org.bukkit.Color dye = NexoFurniture.furnitureDye(display);
+            if (dye == null) {
+                return item;
+            }
+            ItemStack copy = item.clone();
+            copy.setData(io.papermc.paper.datacomponent.DataComponentTypes.DYED_COLOR,
+                    io.papermc.paper.datacomponent.item.DyedItemColor.dyedItemColor().color(dye).build());
+            return copy;
+        } catch (RuntimeException | LinkageError e) {
+            return item; // no dye API on this Nexo or Paper: the item as it is
+        }
     }
 
     private int displayItemErrors;
